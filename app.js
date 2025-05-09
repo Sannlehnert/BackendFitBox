@@ -111,7 +111,7 @@ const initializeDatabase = async () => {
         monto_pagado DECIMAL(10, 2) NOT NULL DEFAULT 0,
         saldo_pendiente DECIMAL(10, 2) GENERATED ALWAYS AS (monto_total - monto_pagado) STORED,
         mes_pagado VARCHAR(20) NOT NULL,
-        hora_pago TIME DEFAULT CURRENT_TIME,
+        hora_pago DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (id_persona) REFERENCES persona(id_persona) ON DELETE CASCADE,
         INDEX idx_fecha (fecha),
         INDEX idx_mes_pagado (mes_pagado)
