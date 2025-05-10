@@ -24,15 +24,15 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  // Para SSL si es necesario
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync(__dirname + '/path/to/your/ca.pem') // Si usas SSL
+  },
+  // Añade estos parámetros para mejor manejo de conexiones
+  connectTimeout: 10000,
+  acquireTimeout: 10000,
+  timeout: 10000
 };
-
-// Validación de configuración de base de datos
-if (!dbConfig.host || !dbConfig.user || !dbConfig.database) {
-  console.error('Error: Configuración de base de datos incompleta');
-  process.exit(1);
-}
 
 // Crear pool de conexiones
 const pool = mysql.createPool(dbConfig);
@@ -69,11 +69,12 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
 app.use((req, res, next) => {
-  console.log('====================================');
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  console.log('\n===== Nueva Petición =====');
+  console.log(`Método: ${req.method}`);
+  console.log(`Ruta: ${req.originalUrl}`);
   console.log('Headers:', req.headers);
-  console.log('Origin:', req.headers.origin);
-  console.log('====================================');
+  console.log('Body:', req.body);
+  console.log('==========================\n');
   next();
 });
 
@@ -451,6 +452,8 @@ app.get('/clientes', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+    
+    // Query optimizada y con manejo de errores mejorado
     const [results] = await connection.query(`
       SELECT 
         p.id_persona,
@@ -460,47 +463,36 @@ app.get('/clientes', async (req, res) => {
         p.DNI,
         COALESCE(p.telefono_tutor, '') as telefono,
         DATE_FORMAT(p.fecha_registro, '%Y-%m-%d %H:%i:%s') as fecha_registro,
-        DATE_FORMAT(ultima_cuota.fecha, '%Y-%m-%d') as ultimo_pago,
+        DATE_FORMAT(MAX(c.fecha), '%Y-%m-%d') as ultimo_pago,
         COALESCE(SUM(c.monto_pagado), 0) as total_pagado,
         COALESCE(SUM(c.monto_total), 0) as monto_total,
-        ultima_cuota.saldo_pendiente as saldo_pendiente,  -- Solo el saldo de la última cuota
+        COALESCE(SUM(c.saldo_pendiente), 0) as saldo_pendiente,
         CASE 
-          WHEN ultima_cuota.fecha IS NULL THEN 'No Pagado'
-          WHEN ultima_cuota.saldo_pendiente > 0 THEN 
-            CONCAT('DEBE: $', FORMAT(ultima_cuota.saldo_pendiente, 2))
-          WHEN DATEDIFF(CURDATE(), ultima_cuota.fecha) > 30 THEN 'Vencido'
+          WHEN MAX(c.fecha) IS NULL THEN 'No Pagado'
+          WHEN SUM(c.saldo_pendiente) > 0 THEN 
+            CONCAT('DEBE: $', FORMAT(SUM(c.saldo_pendiente), 2))
+          WHEN DATEDIFF(CURDATE(), MAX(c.fecha)) > 30 THEN 'Vencido'
           ELSE 'Al día'
         END as estado_pago
       FROM persona p
       LEFT JOIN cuota c ON p.id_persona = c.id_persona
-      LEFT JOIN (
-        SELECT id_persona, fecha, saldo_pendiente 
-        FROM cuota 
-        WHERE (id_persona, fecha) IN (
-          SELECT id_persona, MAX(fecha) 
-          FROM cuota 
-          GROUP BY id_persona
-        )
-      ) ultima_cuota ON p.id_persona = ultima_cuota.id_persona
       GROUP BY p.id_persona
       ORDER BY p.nombre`);
 
-    const processedResults = results.map(client => ({
-      ...client,
-      total_pagado: parseFloat(client.total_pagado),
-      monto_total: parseFloat(client.monto_total),
-      saldo_pendiente: parseFloat(client.saldo_pendiente)
-    }));
-
     res.json({
       success: true,
-      data: processedResults
+      data: results.map(client => ({
+        ...client,
+        total_pagado: parseFloat(client.total_pagado),
+        monto_total: parseFloat(client.monto_total),
+        saldo_pendiente: parseFloat(client.saldo_pendiente)
+      }))
     });
   } catch (error) {
-    console.error('Error al obtener clientes:', error);
+    console.error('Error en /clientes:', error);
     res.status(500).json({
       success: false,
-      error: 'Error al obtener lista de clientes',
+      error: 'Error al obtener clientes',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
