@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cron from 'node-cron';
+import fs from 'fs'
 
 // Configuración de variables de entorno
 dotenv.config();
@@ -24,11 +25,9 @@ const dbConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
-  ssl: {
-    rejectUnauthorized: true,
-    ca: fs.readFileSync(__dirname + '/path/to/your/ca.pem') // Si usas SSL
-  },
-  // Añade estos parámetros para mejor manejo de conexiones
+  
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+
   connectTimeout: 10000,
   acquireTimeout: 10000,
   timeout: 10000
