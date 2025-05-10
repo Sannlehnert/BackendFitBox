@@ -67,16 +67,14 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-app.use((err, req, res, next) => {
-  console.error('⚠️ Error en:', req.method, req.path);
-  console.error('Detalles:', err.stack);
-  
-  res.status(500).json({ 
-    success: false,
-    error: 'Error interno del servidor',
-    // Solo muestra detalles en desarrollo
-    details: process.env.NODE_ENV === 'development' ? err.message : undefined
-  });
+app.use((req, res, next) => {
+  console.log('\n===== Nueva Petición =====');
+  console.log(`Método: ${req.method}`);
+  console.log(`Ruta: ${req.originalUrl}`);
+  console.log('Headers:', req.headers);
+  console.log('Body:', req.body);
+  console.log('==========================\n');
+  next();
 });
 
 // Limitador de tasa para prevenir ataques de fuerza bruta
@@ -320,7 +318,7 @@ app.get('/', (req, res) => {
 });
 
 // Ruta para registrar clientes
-app.post('/api/personas', validateClientData, async (req, res) => {
+app.post('/personas', validateClientData, async (req, res) => {
   let connection;
   try {
     const { nombre, apellido, DNI, lesiones, telefono_tutor, es_menor } = req.body;
@@ -365,40 +363,67 @@ app.post('/api/personas', validateClientData, async (req, res) => {
 });
 
 // Ruta para registrar pagos
-app.post('/api/pagos', validatePaymentData, async (req, res) => {
+app.post('/pagos', validatePaymentData, async (req, res) => {
   let connection;
   try {
+    const { id_persona, monto_total, metodo_pago, fecha_pago, pagos_parciales } = req.body;
+
+    const fecha = moment(fecha_pago).format('YYYY-MM-DD');
+    const mes_pagado = moment(fecha_pago).format('MMMM YYYY');
+    const montoTotalNum = parseFloat(monto_total);
+
     connection = await pool.getConnection();
     await connection.beginTransaction();
-
-    const { id_persona, monto_total, fecha_pago, pagos_parciales = [] } = req.body;
 
     // 1. Insertar la cuota principal
     const [cuotaResult] = await connection.query(
       `INSERT INTO cuota (id_persona, fecha, monto_total, mes_pagado) 
        VALUES (?, ?, ?, ?)`,
-      [id_persona, fecha_pago, monto_total, moment(fecha_pago).format('MMMM YYYY')]
+      [id_persona, fecha, montoTotalNum, mes_pagado]
     );
 
     const id_cuota = cuotaResult.insertId;
     let monto_pagado = 0;
 
     // 2. Procesar pagos parciales
-    for (const pago of pagos_parciales) {
-      const montoParcial = parseFloat(pago.monto);
-      monto_pagado += montoParcial;
+    if (pagos_parciales?.length > 0) {
+      for (const pago of pagos_parciales) {
+        const montoParcial = parseFloat(pago.monto);
+        monto_pagado += montoParcial;
 
+        await connection.query(
+          `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
+           VALUES (?, ?, ?)`,
+          [id_cuota, montoParcial, pago.metodo_pago]
+        );
+      }
+    } else {
+      // Pago completo
+      monto_pagado = montoTotalNum;
       await connection.query(
         `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
          VALUES (?, ?, ?)`,
-        [id_cuota, montoParcial, pago.metodo_pago]
+        [id_cuota, montoTotalNum, metodo_pago || 'efectivo']
       );
     }
 
-    // 3. Actualizar monto pagado
+    // 3. Validar y actualizar monto pagado
+    if (monto_pagado > montoTotalNum) {
+      throw new Error('El monto pagado no puede exceder el monto total');
+    }
+
+    // 4. Actualizar monto pagado (esto activará el cálculo automático de saldo_pendiente)
     await connection.query(
       `UPDATE cuota SET monto_pagado = ? WHERE id_cuota = ?`,
       [monto_pagado, id_cuota]
+    );
+
+    // 5. Actualizar membresía si es necesario
+    await connection.query(`
+      UPDATE membresia 
+      SET estado = 'activa'
+      WHERE id_persona = ? AND estado = 'vencida'`,
+      [id_persona]
     );
 
     await connection.commit();
@@ -410,15 +435,11 @@ app.post('/api/pagos', validatePaymentData, async (req, res) => {
     });
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error('Error en /api/pagos:', error);
+    console.error('Error al registrar pago:', error);
     res.status(500).json({
       success: false,
       error: 'Error al registrar pago',
-      details: process.env.NODE_ENV === 'development' ? {
-        message: error.message,
-        sqlMessage: error.sqlMessage,
-        stack: error.stack
-      } : undefined
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
     if (connection) connection.release();
@@ -426,44 +447,55 @@ app.post('/api/pagos', validatePaymentData, async (req, res) => {
 });
 
 // Endpoint para listar clientes
-app.get('/api/clientes', async (req, res) => {
+app.get('/clientes', async (req, res) => {
+  let connection;
   try {
-    const [results] = await pool.query(`
+    connection = await pool.getConnection();
+    
+    // Query optimizada y con manejo de errores mejorado
+    const [results] = await connection.query(`
       SELECT 
         p.id_persona,
+        p.nombre,
+        p.apellido,
         CONCAT(p.nombre, ' ', p.apellido) as nombre_completo,
         p.DNI,
         COALESCE(p.telefono_tutor, '') as telefono,
         DATE_FORMAT(p.fecha_registro, '%Y-%m-%d %H:%i:%s') as fecha_registro,
-        DATE_FORMAT(ultima_cuota.fecha, '%Y-%m-%d') as ultimo_pago,
+        DATE_FORMAT(MAX(c.fecha), '%Y-%m-%d') as ultimo_pago,
         COALESCE(SUM(c.monto_pagado), 0) as total_pagado,
         COALESCE(SUM(c.monto_total), 0) as monto_total,
-        ultima_cuota.saldo_pendiente as saldo_pendiente,  -- Solo el saldo de la última cuota
+        COALESCE(SUM(c.saldo_pendiente), 0) as saldo_pendiente,
         CASE 
-          WHEN ultima_cuota.fecha IS NULL THEN 'No Pagado'
-          WHEN ultima_cuota.saldo_pendiente > 0 THEN 
-            CONCAT('DEBE: $', FORMAT(ultima_cuota.saldo_pendiente, 2))
-          WHEN DATEDIFF(CURDATE(), ultima_cuota.fecha) > 30 THEN 'Vencido'
+          WHEN MAX(c.fecha) IS NULL THEN 'No Pagado'
+          WHEN SUM(c.saldo_pendiente) > 0 THEN 
+            CONCAT('DEBE: $', FORMAT(SUM(c.saldo_pendiente), 2))
+          WHEN DATEDIFF(CURDATE(), MAX(c.fecha)) > 30 THEN 'Vencido'
           ELSE 'Al día'
         END as estado_pago
       FROM persona p
       LEFT JOIN cuota c ON p.id_persona = c.id_persona
-      LEFT JOIN (
-        SELECT id_persona, fecha, saldo_pendiente 
-        FROM cuota 
-        WHERE (id_persona, fecha) IN (
-          SELECT id_persona, MAX(fecha) 
-          FROM cuota 
-          GROUP BY id_persona
-        )
-      ) ultima_cuota ON p.id_persona = ultima_cuota.id_persona
       GROUP BY p.id_persona
       ORDER BY p.nombre`);
 
-        res.json({ success: true, data: results });
+    res.json({
+      success: true,
+      data: results.map(client => ({
+        ...client,
+        total_pagado: parseFloat(client.total_pagado),
+        monto_total: parseFloat(client.monto_total),
+        saldo_pendiente: parseFloat(client.saldo_pendiente)
+      }))
+    });
   } catch (error) {
-    console.error('Error en /api/clientes:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener clientes' });
+    console.error('Error en /clientes:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener clientes',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -512,7 +544,7 @@ app.get('/buscar-cliente', async (req, res) => {
 });
 
 // Endpoint para detalles del cliente
-app.get('/api/clientes/:id', async (req, res) => {
+app.get('/clientes/:id', async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -582,9 +614,33 @@ function calcularEstadoPago(cliente) {
 
 // Endpoint para pagos detallados
 app.get('/clientes/:id/pagos-detallados', async (req, res) => {
+  let connection;
   try {
     const { id } = req.params;
-    const [results] = await pool.query(`
+
+    if (!id || isNaN(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de cliente inválido'
+      });
+    }
+
+    connection = await pool.getConnection();
+
+    // Verificar que el cliente existe primero
+    const [clientCheck] = await connection.query(
+      'SELECT id_persona FROM persona WHERE id_persona = ?',
+      [id]
+    );
+
+    if (clientCheck.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Cliente no encontrado'
+      });
+    }
+
+    const [payments] = await connection.query(`
       SELECT 
         c.id_cuota,
         DATE_FORMAT(c.fecha, '%Y-%m-%d') as fecha,
@@ -601,15 +657,32 @@ app.get('/clientes/:id/pagos-detallados', async (req, res) => {
       WHERE c.id_persona = ?
       ORDER BY c.fecha DESC`, [id]);
 
-    res.json({ 
+    const processedPayments = payments.map(payment => ({
+      ...payment,
+      monto_total: parseFloat(payment.monto_total),
+      monto_pagado: parseFloat(payment.monto_pagado),
+      saldo_pendiente: parseFloat(payment.saldo_pendiente),
+      detalle_pagos: payment.detalle_pagos
+        ? payment.detalle_pagos.split('|')
+        : []
+    }));
+
+    res.json({
       success: true,
-      data: results.map(p => ({
-        ...p,
-        detalle_pagos: p.detalle_pagos ? p.detalle_pagos.split('|') : []
-      }))
+      data: processedPayments
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Error al obtener pagos detallados:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener historial de pagos',
+      details: process.env.NODE_ENV === 'development' ? {
+        message: error.message,
+        sqlError: error.sqlMessage
+      } : undefined
+    });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
