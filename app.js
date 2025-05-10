@@ -39,8 +39,6 @@ app.use(helmet());
 app.use(morgan('combined'));
 
 // Configuración CORS
-const cors = require('cors');
-
 const allowedOrigins = [
   'http://localhost:5173',
   'https://fit-box.netlify.app'
