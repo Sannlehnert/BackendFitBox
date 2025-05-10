@@ -39,12 +39,17 @@ app.use(helmet());
 app.use(morgan('combined'));
 
 // Configuración CORS
-const corsOptions = {
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-app.use(cors(corsOptions));
+const cors = require('cors');
+
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://fit-box.netlify.app'
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true // si usás cookies
+}));
 
 // Limitador de tasa para prevenir ataques de fuerza bruta
 const limiter = rateLimit({
