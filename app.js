@@ -69,7 +69,9 @@ app.options('*', cors(corsOptions));
 
 app.use((req, res, next) => {
   console.log('\n===== Nueva Petición =====');
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  console.log(`Método: ${req.method}`);
+  console.log(`Ruta: ${req.originalUrl}`);
+  console.log('Headers:', req.headers);
   console.log('Body:', req.body);
   console.log('==========================\n');
   next();
@@ -316,7 +318,7 @@ app.get('/', (req, res) => {
 });
 
 // Ruta para registrar clientes
-app.post('/api/personas', validateClientData, async (req, res) => {
+app.post('/personas', validateClientData, async (req, res) => {
   let connection;
   try {
     const { nombre, apellido, DNI, lesiones, telefono_tutor, es_menor } = req.body;
@@ -361,7 +363,7 @@ app.post('/api/personas', validateClientData, async (req, res) => {
 });
 
 // Ruta para registrar pagos
-app.post('/api/pagos', validatePaymentData, async (req, res) => {
+app.post('/pagos', validatePaymentData, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -422,12 +424,10 @@ app.post('/api/pagos', validatePaymentData, async (req, res) => {
 });
 
 // Endpoint para listar clientes
-app.get('/api/clientes', async (req, res) => {
+app.get('/clientes', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    
-    // Query optimizada y con manejo de errores mejorado
     const [results] = await connection.query(`
       SELECT 
         p.id_persona,
@@ -437,19 +437,28 @@ app.get('/api/clientes', async (req, res) => {
         p.DNI,
         COALESCE(p.telefono_tutor, '') as telefono,
         DATE_FORMAT(p.fecha_registro, '%Y-%m-%d %H:%i:%s') as fecha_registro,
-        DATE_FORMAT(MAX(c.fecha), '%Y-%m-%d') as ultimo_pago,
+        DATE_FORMAT(ultima_cuota.fecha, '%Y-%m-%d') as ultimo_pago,
         COALESCE(SUM(c.monto_pagado), 0) as total_pagado,
         COALESCE(SUM(c.monto_total), 0) as monto_total,
-        COALESCE(SUM(c.saldo_pendiente), 0) as saldo_pendiente,
+        ultima_cuota.saldo_pendiente as saldo_pendiente,  -- Solo el saldo de la última cuota
         CASE 
-          WHEN MAX(c.fecha) IS NULL THEN 'No Pagado'
-          WHEN SUM(c.saldo_pendiente) > 0 THEN 
-            CONCAT('DEBE: $', FORMAT(SUM(c.saldo_pendiente), 2))
-          WHEN DATEDIFF(CURDATE(), MAX(c.fecha)) > 30 THEN 'Vencido'
+          WHEN ultima_cuota.fecha IS NULL THEN 'No Pagado'
+          WHEN ultima_cuota.saldo_pendiente > 0 THEN 
+            CONCAT('DEBE: $', FORMAT(ultima_cuota.saldo_pendiente, 2))
+          WHEN DATEDIFF(CURDATE(), ultima_cuota.fecha) > 30 THEN 'Vencido'
           ELSE 'Al día'
         END as estado_pago
       FROM persona p
       LEFT JOIN cuota c ON p.id_persona = c.id_persona
+      LEFT JOIN (
+        SELECT id_persona, fecha, saldo_pendiente 
+        FROM cuota 
+        WHERE (id_persona, fecha) IN (
+          SELECT id_persona, MAX(fecha) 
+          FROM cuota 
+          GROUP BY id_persona
+        )
+      ) ultima_cuota ON p.id_persona = ultima_cuota.id_persona
       GROUP BY p.id_persona
       ORDER BY p.nombre`);
 
@@ -519,7 +528,7 @@ app.get('/buscar-cliente', async (req, res) => {
 });
 
 // Endpoint para detalles del cliente
-app.get('/api/clientes/:id', async (req, res) => {
+app.get('/clientes/:id', async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -589,33 +598,9 @@ function calcularEstadoPago(cliente) {
 
 // Endpoint para pagos detallados
 app.get('/clientes/:id/pagos-detallados', async (req, res) => {
-  let connection;
   try {
     const { id } = req.params;
-
-    if (!id || isNaN(id)) {
-      return res.status(400).json({
-        success: false,
-        error: 'ID de cliente inválido'
-      });
-    }
-
-    connection = await pool.getConnection();
-
-    // Verificar que el cliente existe primero
-    const [clientCheck] = await connection.query(
-      'SELECT id_persona FROM persona WHERE id_persona = ?',
-      [id]
-    );
-
-    if (clientCheck.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Cliente no encontrado'
-      });
-    }
-
-    const [payments] = await connection.query(`
+    const [results] = await pool.query(`
       SELECT 
         c.id_cuota,
         DATE_FORMAT(c.fecha, '%Y-%m-%d') as fecha,
@@ -632,32 +617,15 @@ app.get('/clientes/:id/pagos-detallados', async (req, res) => {
       WHERE c.id_persona = ?
       ORDER BY c.fecha DESC`, [id]);
 
-    const processedPayments = payments.map(payment => ({
-      ...payment,
-      monto_total: parseFloat(payment.monto_total),
-      monto_pagado: parseFloat(payment.monto_pagado),
-      saldo_pendiente: parseFloat(payment.saldo_pendiente),
-      detalle_pagos: payment.detalle_pagos
-        ? payment.detalle_pagos.split('|')
-        : []
-    }));
-
-    res.json({
+    res.json({ 
       success: true,
-      data: processedPayments
+      data: results.map(p => ({
+        ...p,
+        detalle_pagos: p.detalle_pagos ? p.detalle_pagos.split('|') : []
+      }))
     });
   } catch (error) {
-    console.error('Error al obtener pagos detallados:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error al obtener historial de pagos',
-      details: process.env.NODE_ENV === 'development' ? {
-        message: error.message,
-        sqlError: error.sqlMessage
-      } : undefined
-    });
-  } finally {
-    if (connection) connection.release();
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
