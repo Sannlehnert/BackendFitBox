@@ -67,14 +67,16 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-app.use((req, res, next) => {
-  console.log('\n===== Nueva Petición =====');
-  console.log(`Método: ${req.method}`);
-  console.log(`Ruta: ${req.originalUrl}`);
-  console.log('Headers:', req.headers);
-  console.log('Body:', req.body);
-  console.log('==========================\n');
-  next();
+app.use((err, req, res, next) => {
+  console.error('⚠️ Error en:', req.method, req.path);
+  console.error('Detalles:', err.stack);
+  
+  res.status(500).json({ 
+    success: false,
+    error: 'Error interno del servidor',
+    // Solo muestra detalles en desarrollo
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 // Limitador de tasa para prevenir ataques de fuerza bruta
@@ -318,7 +320,7 @@ app.get('/', (req, res) => {
 });
 
 // Ruta para registrar clientes
-app.post('/personas', validateClientData, async (req, res) => {
+app.post('/api/personas', validateClientData, async (req, res) => {
   let connection;
   try {
     const { nombre, apellido, DNI, lesiones, telefono_tutor, es_menor } = req.body;
@@ -363,7 +365,7 @@ app.post('/personas', validateClientData, async (req, res) => {
 });
 
 // Ruta para registrar pagos
-app.post('/pagos', validatePaymentData, async (req, res) => {
+app.post('/api/pagos', validatePaymentData, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -424,15 +426,11 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
 });
 
 // Endpoint para listar clientes
-app.get('/clientes', async (req, res) => {
-  let connection;
+app.get('/api/clientes', async (req, res) => {
   try {
-    connection = await pool.getConnection();
-    const [results] = await connection.query(`
+    const [results] = await pool.query(`
       SELECT 
         p.id_persona,
-        p.nombre,
-        p.apellido,
         CONCAT(p.nombre, ' ', p.apellido) as nombre_completo,
         p.DNI,
         COALESCE(p.telefono_tutor, '') as telefono,
@@ -462,24 +460,10 @@ app.get('/clientes', async (req, res) => {
       GROUP BY p.id_persona
       ORDER BY p.nombre`);
 
-    res.json({
-      success: true,
-      data: results.map(client => ({
-        ...client,
-        total_pagado: parseFloat(client.total_pagado),
-        monto_total: parseFloat(client.monto_total),
-        saldo_pendiente: parseFloat(client.saldo_pendiente)
-      }))
-    });
+        res.json({ success: true, data: results });
   } catch (error) {
-    console.error('Error en /clientes:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error al obtener clientes',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
-  } finally {
-    if (connection) connection.release();
+    console.error('Error en /api/clientes:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener clientes' });
   }
 });
 
@@ -528,7 +512,7 @@ app.get('/buscar-cliente', async (req, res) => {
 });
 
 // Endpoint para detalles del cliente
-app.get('/clientes/:id', async (req, res) => {
+app.get('/api/clientes/:id', async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
