@@ -69,9 +69,7 @@ app.options('*', cors(corsOptions));
 
 app.use((req, res, next) => {
   console.log('\n===== Nueva Petición =====');
-  console.log(`Método: ${req.method}`);
-  console.log(`Ruta: ${req.originalUrl}`);
-  console.log('Headers:', req.headers);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   console.log('Body:', req.body);
   console.log('==========================\n');
   next();
@@ -318,7 +316,7 @@ app.get('/', (req, res) => {
 });
 
 // Ruta para registrar clientes
-app.post('/personas', validateClientData, async (req, res) => {
+app.post('/api/personas', validateClientData, async (req, res) => {
   let connection;
   try {
     const { nombre, apellido, DNI, lesiones, telefono_tutor, es_menor } = req.body;
@@ -363,13 +361,13 @@ app.post('/personas', validateClientData, async (req, res) => {
 });
 
 // Ruta para registrar pagos
-app.post('/pagos', validatePaymentData, async (req, res) => {
+app.post('/api/pagos', validatePaymentData, async (req, res) => {
   let connection;
   try {
-    const { id_persona, monto_total, metodo_pago, fecha_pago, pagos_parciales } = req.body;
-
     connection = await pool.getConnection();
     await connection.beginTransaction();
+
+    const { id_persona, monto_total, fecha_pago, pagos_parciales = [] } = req.body;
 
     // 1. Insertar la cuota principal
     const [cuotaResult] = await connection.query(
@@ -382,45 +380,21 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
     let monto_pagado = 0;
 
     // 2. Procesar pagos parciales
-    if (pagos_parciales?.length > 0) {
-      for (const pago of pagos_parciales) {
-        const montoParcial = parseFloat(pago.monto);
-        monto_pagado += montoParcial;
+    for (const pago of pagos_parciales) {
+      const montoParcial = parseFloat(pago.monto);
+      monto_pagado += montoParcial;
 
-        await connection.query(
-          `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
-           VALUES (?, ?, ?)`,
-          [id_cuota, montoParcial, pago.metodo_pago]
-        );
-      }
-    } else {
-      // Pago completo
-      monto_pagado = parseFloat(monto_total);
       await connection.query(
         `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
          VALUES (?, ?, ?)`,
-        [id_cuota, monto_total, metodo_pago || 'efectivo']
+        [id_cuota, montoParcial, pago.metodo_pago]
       );
     }
 
-    // 3. Actualizar monto pagado en la cuota
+    // 3. Actualizar monto pagado
     await connection.query(
       `UPDATE cuota SET monto_pagado = ? WHERE id_cuota = ?`,
       [monto_pagado, id_cuota]
-    );
-
-    // 4. Recalcular saldos pendientes para todas las cuotas del cliente
-    await connection.query(`
-      UPDATE cuota c
-      JOIN (
-        SELECT id_persona, SUM(monto_total) as total_deuda, SUM(monto_pagado) as total_pagado
-        FROM cuota
-        WHERE id_persona = ?
-        GROUP BY id_persona
-      ) t ON c.id_persona = t.id_persona
-      SET c.saldo_pendiente = c.monto_total - c.monto_pagado
-      WHERE c.id_persona = ?`,
-      [id_persona, id_persona]
     );
 
     await connection.commit();
@@ -432,11 +406,15 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
     });
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error('Error al registrar pago:', error);
+    console.error('Error en /api/pagos:', error);
     res.status(500).json({
       success: false,
       error: 'Error al registrar pago',
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      details: process.env.NODE_ENV === 'development' ? {
+        message: error.message,
+        sqlMessage: error.sqlMessage,
+        stack: error.stack
+      } : undefined
     });
   } finally {
     if (connection) connection.release();
@@ -444,7 +422,7 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
 });
 
 // Endpoint para listar clientes
-app.get('/clientes', async (req, res) => {
+app.get('/api/clientes', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -541,7 +519,7 @@ app.get('/buscar-cliente', async (req, res) => {
 });
 
 // Endpoint para detalles del cliente
-app.get('/clientes/:id', async (req, res) => {
+app.get('/api/clientes/:id', async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
