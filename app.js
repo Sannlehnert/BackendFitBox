@@ -277,6 +277,21 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend FitBox funcionando correctamente',
+    environment: process.env.NODE_ENV,
+    availableRoutes: [
+      '/personas - POST (registrar cliente)',
+      '/pagos - POST (registrar pago)',
+      '/clientes - GET (listar clientes)',
+      '/clientes/:id - GET (detalle cliente)',
+      '/health - GET (estado del servidor)'
+    ]
+  });
+});
+
 // Ruta para registrar clientes
 app.post('/personas', validateClientData, async (req, res) => {
   let connection;
