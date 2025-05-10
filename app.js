@@ -366,12 +366,8 @@ app.post('/personas', validateClientData, async (req, res) => {
 app.post('/pagos', validatePaymentData, async (req, res) => {
   let connection;
   try {
-    const { id_persona, monto_total, metodo_pago, fecha_pago, pagos_parciales } = req.body;
-
-    const fecha = moment(fecha_pago).format('YYYY-MM-DD');
-    const mes_pagado = moment(fecha_pago).format('MMMM YYYY');
-    const montoTotalNum = parseFloat(monto_total);
-
+    const { id_persona, monto_total, fecha_pago, pagos_parciales = [] } = req.body;
+    
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
@@ -379,51 +375,33 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
     const [cuotaResult] = await connection.query(
       `INSERT INTO cuota (id_persona, fecha, monto_total, mes_pagado) 
        VALUES (?, ?, ?, ?)`,
-      [id_persona, fecha, montoTotalNum, mes_pagado]
+      [id_persona, fecha_pago, monto_total, moment(fecha_pago).format('MMMM YYYY')]
     );
 
     const id_cuota = cuotaResult.insertId;
     let monto_pagado = 0;
 
     // 2. Procesar pagos parciales
-    if (pagos_parciales?.length > 0) {
-      for (const pago of pagos_parciales) {
-        const montoParcial = parseFloat(pago.monto);
-        monto_pagado += montoParcial;
+    for (const pago of pagos_parciales) {
+      const montoParcial = parseFloat(pago.monto);
+      monto_pagado += montoParcial;
 
-        await connection.query(
-          `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
-           VALUES (?, ?, ?)`,
-          [id_cuota, montoParcial, pago.metodo_pago]
-        );
-      }
-    } else {
-      // Pago completo
-      monto_pagado = montoTotalNum;
       await connection.query(
         `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
          VALUES (?, ?, ?)`,
-        [id_cuota, montoTotalNum, metodo_pago || 'efectivo']
+        [id_cuota, montoParcial, pago.metodo_pago]
       );
     }
 
-    // 3. Validar y actualizar monto pagado
-    if (monto_pagado > montoTotalNum) {
+    // 3. Validar que el monto pagado no exceda el total
+    if (monto_pagado > parseFloat(monto_total)) {
       throw new Error('El monto pagado no puede exceder el monto total');
     }
 
-    // 4. Actualizar monto pagado (esto activará el cálculo automático de saldo_pendiente)
+    // 4. Actualizar monto pagado en la cuota (el saldo_pendiente se calcula automáticamente)
     await connection.query(
       `UPDATE cuota SET monto_pagado = ? WHERE id_cuota = ?`,
       [monto_pagado, id_cuota]
-    );
-
-    // 5. Actualizar membresía si es necesario
-    await connection.query(`
-      UPDATE membresia 
-      SET estado = 'activa'
-      WHERE id_persona = ? AND estado = 'vencida'`,
-      [id_persona]
     );
 
     await connection.commit();
@@ -431,11 +409,12 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
     res.status(201).json({
       success: true,
       message: 'Pago registrado exitosamente',
-      id: id_cuota
+      id: id_cuota,
+      saldo_pendiente: (parseFloat(monto_total) - monto_pagado).toFixed(2)
     });
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error('Error al registrar pago:', error);
+    console.error('Error en /api/pagos:', error);
     res.status(500).json({
       success: false,
       error: 'Error al registrar pago',
