@@ -504,55 +504,39 @@ app.get('/buscar-cliente', async (req, res) => {
   let connection;
   try {
     const { query } = req.query;
-    const searchTerm = `%${query.trim()}%`;
+    
+    if (!query || query.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'El término de búsqueda debe tener al menos 2 caracteres'
+      });
+    }
 
+    const searchTerm = `%${query.trim()}%`;
     connection = await pool.getConnection();
-    const [results] = await connection.query(`
-      SELECT 
+
+    const [results] = await connection.query(
+      `SELECT 
         p.id_persona,
         CONCAT(p.nombre, ' ', p.apellido) as nombre_completo,
         p.DNI,
-        COALESCE(p.telefono_tutor, '') as telefono,
-        DATE_FORMAT(ultima_cuota.fecha, '%Y-%m-%d') as ultimo_pago,
-        COALESCE(SUM(c.monto_pagado), 0) as total_pagado,
-        ultima_cuota.saldo_pendiente as saldo_pendiente,  -- Solo el saldo de la última cuota
-        CASE 
-          WHEN ultima_cuota.fecha IS NULL THEN 'No Pagado'
-          WHEN ultima_cuota.saldo_pendiente > 0 THEN 
-            CONCAT('DEBE: $', FORMAT(ultima_cuota.saldo_pendiente, 2))
-          WHEN DATEDIFF(CURDATE(), ultima_cuota.fecha) > 30 THEN 'Vencido'
-          ELSE 'Al día'
-        END as estado_pago
+        p.telefono_tutor as telefono,
+        (SELECT MAX(fecha) FROM cuota WHERE id_persona = p.id_persona) as ultimo_pago
       FROM persona p
-      LEFT JOIN cuota c ON p.id_persona = c.id_persona
-      LEFT JOIN (
-        SELECT id_persona, fecha, saldo_pendiente 
-        FROM cuota 
-        WHERE (id_persona, fecha) IN (
-          SELECT id_persona, MAX(fecha) 
-          FROM cuota 
-          GROUP BY id_persona
-        )
-      ) ultima_cuota ON p.id_persona = ultima_cuota.id_persona
       WHERE p.nombre LIKE ? OR p.apellido LIKE ? OR p.DNI LIKE ?
-      GROUP BY p.id_persona
-      LIMIT 10`, [searchTerm, searchTerm, searchTerm]);
-
-    const processedResults = results.map(client => ({
-      ...client,
-      total_pagado: parseFloat(client.total_pagado),
-      saldo_pendiente: parseFloat(client.saldo_pendiente)
-    }));
+      LIMIT 10`,
+      [searchTerm, searchTerm, searchTerm]
+    );
 
     res.json({
       success: true,
-      data: processedResults
+      data: results
     });
   } catch (error) {
-    console.error('Error en búsqueda:', error);
+    console.error('Error en /buscar-cliente:', error);
     res.status(500).json({
       success: false,
-      error: 'Error al buscar cliente',
+      error: 'Error en la búsqueda',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
@@ -565,27 +549,22 @@ app.get('/clientes/:id', async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
+    
+    // Validación del ID
+    if (!id || isNaN(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de cliente inválido'
+      });
+    }
+
     connection = await pool.getConnection();
 
-    const [clientData] = await connection.query(`
-      SELECT 
-        p.*,
-        COALESCE(SUM(c.monto_pagado), 0) as total_pagado,
-        COALESCE(SUM(c.monto_total), 0) as monto_total,
-        ultima_cuota.saldo_pendiente as saldo_pendiente,  -- Solo el saldo de la última cuota
-        DATE_FORMAT(ultima_cuota.fecha, '%Y-%m-%d') as ultimo_pago,
-        (SELECT COUNT(*) FROM cuota WHERE id_persona = p.id_persona) as total_pagos,
-        DATE_FORMAT(p.fecha_registro, '%Y-%m-%d %H:%i:%s') as fecha_registro_formatted
-      FROM persona p
-      LEFT JOIN cuota c ON p.id_persona = c.id_persona
-      LEFT JOIN (
-        SELECT id_persona, fecha, saldo_pendiente 
-        FROM cuota 
-        WHERE id_persona = ? 
-        ORDER BY fecha DESC 
-        LIMIT 1
-      ) ultima_cuota ON p.id_persona = ultima_cuota.id_persona
-      WHERE p.id_persona = ?`, [id, id]);
+    // Query para obtener datos básicos del cliente
+    const [clientData] = await connection.query(
+      `SELECT * FROM persona WHERE id_persona = ?`, 
+      [id]
+    );
 
     if (clientData.length === 0) {
       return res.status(404).json({
@@ -594,22 +573,26 @@ app.get('/clientes/:id', async (req, res) => {
       });
     }
 
-    const client = clientData[0];
-    const estado_pago = calcularEstadoPago(client);
+    // Query para obtener información de pagos
+    const [payments] = await connection.query(
+      `SELECT * FROM cuota WHERE id_persona = ? ORDER BY fecha DESC`,
+      [id]
+    );
 
     res.json({
       success: true,
       data: {
-        ...client,
-        estado_pago,
-        total_pagado: parseFloat(client.total_pagado),
-        monto_total: parseFloat(client.monto_total),
-        saldo_pendiente: parseFloat(client.saldo_pendiente),
-        fecha_registro: client.fecha_registro_formatted
+        ...clientData[0],
+        pagos: payments.map(p => ({
+          ...p,
+          monto_total: parseFloat(p.monto_total),
+          monto_pagado: parseFloat(p.monto_pagado),
+          saldo_pendiente: parseFloat(p.saldo_pendiente)
+        }))
       }
     });
   } catch (error) {
-    console.error('Error al obtener cliente:', error);
+    console.error('Error en /clientes/:id:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener cliente',
