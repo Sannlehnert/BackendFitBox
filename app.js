@@ -43,20 +43,39 @@ app.use(morgan('combined'));
 
 // Configuración CORS
 const corsOptions = {
-  origin: [
-    'https://fit-box.netlify.app',
-    'http://localhost:5173' // Para desarrollo local
-  ],
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'https://fit-box.netlify.app',
+      'http://localhost:5173'
+    ];
+    
+    // Permitir solicitudes sin origen (como apps móviles o Postman)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.error('Origen no permitido:', origin);
+      callback(new Error('Origen no permitido por CORS'));
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-  optionsSuccessStatus: 200 // Para navegadores antiguos
+  optionsSuccessStatus: 200
 };
 
 app.use(cors(corsOptions));
-
-// Middleware para manejar preflight requests
 app.options('*', cors(corsOptions));
+
+app.use((req, res, next) => {
+  console.log('====================================');
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  console.log('Headers:', req.headers);
+  console.log('Origin:', req.headers.origin);
+  console.log('====================================');
+  next();
+});
 
 // Limitador de tasa para prevenir ataques de fuerza bruta
 const limiter = rateLimit({
@@ -692,6 +711,20 @@ app.get('/clientes/:id/pagos-detallados', async (req, res) => {
   } finally {
     if (connection) connection.release();
   }
+});
+
+app.use((err, req, res, next) => {
+  console.error('Error en la aplicación:', err);
+  
+  if (err.message === 'Origen no permitido por CORS') {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso no permitido',
+      details: `Origen ${req.headers.origin} no está permitido`
+    });
+  }
+  
+  next(err);
 });
 
 // Middleware para manejo de rutas no encontradas
