@@ -368,10 +368,6 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
   try {
     const { id_persona, monto_total, metodo_pago, fecha_pago, pagos_parciales } = req.body;
 
-    const fecha = moment(fecha_pago).format('YYYY-MM-DD');
-    const mes_pagado = moment(fecha_pago).format('MMMM YYYY');
-    const montoTotalNum = parseFloat(monto_total);
-
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
@@ -379,7 +375,7 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
     const [cuotaResult] = await connection.query(
       `INSERT INTO cuota (id_persona, fecha, monto_total, mes_pagado) 
        VALUES (?, ?, ?, ?)`,
-      [id_persona, fecha, montoTotalNum, mes_pagado]
+      [id_persona, fecha_pago, monto_total, moment(fecha_pago).format('MMMM YYYY')]
     );
 
     const id_cuota = cuotaResult.insertId;
@@ -399,31 +395,32 @@ app.post('/pagos', validatePaymentData, async (req, res) => {
       }
     } else {
       // Pago completo
-      monto_pagado = montoTotalNum;
+      monto_pagado = parseFloat(monto_total);
       await connection.query(
         `INSERT INTO pago_parcial (id_cuota, monto, metodo_pago) 
          VALUES (?, ?, ?)`,
-        [id_cuota, montoTotalNum, metodo_pago || 'efectivo']
+        [id_cuota, monto_total, metodo_pago || 'efectivo']
       );
     }
 
-    // 3. Validar y actualizar monto pagado
-    if (monto_pagado > montoTotalNum) {
-      throw new Error('El monto pagado no puede exceder el monto total');
-    }
-
-    // 4. Actualizar monto pagado (esto activará el cálculo automático de saldo_pendiente)
+    // 3. Actualizar monto pagado en la cuota
     await connection.query(
       `UPDATE cuota SET monto_pagado = ? WHERE id_cuota = ?`,
       [monto_pagado, id_cuota]
     );
 
-    // 5. Actualizar membresía si es necesario
+    // 4. Recalcular saldos pendientes para todas las cuotas del cliente
     await connection.query(`
-      UPDATE membresia 
-      SET estado = 'activa'
-      WHERE id_persona = ? AND estado = 'vencida'`,
-      [id_persona]
+      UPDATE cuota c
+      JOIN (
+        SELECT id_persona, SUM(monto_total) as total_deuda, SUM(monto_pagado) as total_pagado
+        FROM cuota
+        WHERE id_persona = ?
+        GROUP BY id_persona
+      ) t ON c.id_persona = t.id_persona
+      SET c.saldo_pendiente = c.monto_total - c.monto_pagado
+      WHERE c.id_persona = ?`,
+      [id_persona, id_persona]
     );
 
     await connection.commit();
@@ -520,7 +517,6 @@ app.get('/buscar-cliente', async (req, res) => {
         p.id_persona,
         CONCAT(p.nombre, ' ', p.apellido) as nombre_completo,
         p.DNI,
-        p.telefono_tutor as telefono,
         (SELECT MAX(fecha) FROM cuota WHERE id_persona = p.id_persona) as ultimo_pago
       FROM persona p
       WHERE p.nombre LIKE ? OR p.apellido LIKE ? OR p.DNI LIKE ?
