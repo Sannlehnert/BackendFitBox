@@ -8,17 +8,12 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import cron from 'node-cron';
 import fs from 'fs'
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-
 
 // Configuración de variables de entorno
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'fitbox_secreto_2025';
-const JWT_EXPIRES = '8h';
 
 // Configuración de la base de datos
 const dbConfig = {
@@ -36,22 +31,6 @@ const dbConfig = {
   connectTimeout: 10000,
   acquireTimeout: 10000,
   timeout: 10000
-};
-
-const authenticate = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  
-  if (!token) {
-    return res.status(401).json({ success: false, error: 'Acceso no autorizado' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
-    next();
-  } catch (error) {
-    return res.status(401).json({ success: false, error: 'Token inválido' });
-  }
 };
 
 // Crear pool de conexiones
@@ -294,34 +273,6 @@ const validatePaymentData = (req, res, next) => {
 
   next();
 };
-
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-
-  // Credenciales hardcodeadas (puedes cambiarlas por una tabla en DB)
-  const validUsername = 'FitBox';
-  const validPassword = 'FitBox2025';
-
-  if (username !== validUsername || password !== validPassword) {
-    return res.status(401).json({ 
-      success: false, 
-      error: 'Credenciales inválidas' 
-    });
-  }
-
-  // Crear token JWT
-  const token = jwt.sign(
-    { username: validUsername },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES }
-  );
-
-  res.json({
-    success: true,
-    token,
-    user: { username: validUsername }
-  });
-});
 
 // Endpoint para ejecutar manualmente la limpieza
 app.post('/admin/limpieza-inactivos', async (req, res) => {
