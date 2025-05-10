@@ -16,13 +16,16 @@ const PORT = process.env.PORT || 3001;
 
 // Configuración de la base de datos
 const dbConfig = {
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "FitBox2024",
-  database: process.env.DB_NAME || "gimnasio_db",
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  // Para SSL si es necesario
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 };
 
 // Validación de configuración de base de datos
@@ -39,14 +42,14 @@ app.use(helmet());
 app.use(morgan('combined'));
 
 // Configuración CORS
-const allowedOrigins = [
+const allowedOrigins = process.env.CORS_ORIGINS?.split(',') || [
   'http://localhost:5173',
-  'https://fit-box.netlify.app'
+  'https://fitbox-front.netlify.app'
 ];
 
 app.use(cors({
   origin: allowedOrigins,
-  credentials: true // si usás cookies
+  credentials: true
 }));
 
 // Limitador de tasa para prevenir ataques de fuerza bruta
