@@ -50,7 +50,6 @@ const corsOptions = {
       'http://localhost:5173'
     ];
     
-    // Permitir solicitudes sin origen (como apps móviles o Postman)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
@@ -61,7 +60,7 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization'], // Asegúrate que Authorization esté aquí
   credentials: true,
   optionsSuccessStatus: 200
 };
@@ -85,18 +84,24 @@ const JWT_EXPIRES = '8h';
 
 // Middleware de autenticación
 const authenticate = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  const authHeader = req.headers.authorization;
   
-  if (!token) {
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ success: false, error: 'Acceso no autorizado' });
   }
 
+  const token = authHeader.split(' ')[1];
+  
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
-    return res.status(401).json({ success: false, error: 'Token inválido' });
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Token inválido o expirado',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 };
 
